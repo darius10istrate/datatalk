@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { init, QueryStopped, runQuery, type LoadProgress, type Result } from './db/duckdb';
+import { init, QueryRejected, QueryStopped, runQuery, type LoadProgress, type Result } from './db/duckdb';
 
 type Load = { kind: 'loading'; progress: LoadProgress } | { kind: 'ready'; rows: number } | { kind: 'failed'; message: string };
 
@@ -8,6 +8,7 @@ type Run =
   | { kind: 'running'; started: number }
   | { kind: 'done'; result: Result }
   | { kind: 'stopped'; message: string }
+  | { kind: 'rejected'; message: string }
   | { kind: 'error'; message: string };
 
 const fmt = (n: number) => n.toLocaleString('en-US');
@@ -52,6 +53,7 @@ export function App() {
       setRun({ kind: 'done', result: await runQuery(sql, controller.signal) });
     } catch (e) {
       if (e instanceof QueryStopped) setRun({ kind: 'stopped', message: e.message });
+      else if (e instanceof QueryRejected) setRun({ kind: 'rejected', message: e.message });
       else setRun({ kind: 'error', message: e instanceof Error ? e.message : String(e) });
     } finally {
       abort.current = null;
@@ -100,6 +102,7 @@ export function App() {
 
       <section className="panel">
         {run.kind === 'stopped' && <p className="muted">{run.message}</p>}
+        {run.kind === 'rejected' && <p className="err">{run.message}</p>}
         {run.kind === 'error' && <p className="err">{run.message}</p>}
         {run.kind === 'done' && <ResultsTable result={run.result} />}
       </section>

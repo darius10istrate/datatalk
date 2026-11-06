@@ -1,12 +1,9 @@
 import type { Table as ArrowTable } from 'apache-arrow';
 import { batchToRows, type Cell } from '../shared/cells.ts';
 import { DUCKDB_VERSION } from '../shared/lockdown.ts';
+import { MAX_ROWS, stripTail, wrap } from '../shared/wrap.ts';
 import { openEngine, type Engine } from '../tests/engine.ts';
 import { DEV_QUESTIONS, type GoldenQuestion } from './questions.ts';
-
-const ROW_CAP = 1_000;
-
-const capRows = (sql: string) => `SELECT * FROM (\n${sql}\n) LIMIT ${ROW_CAP + 1}`;
 
 const referencesOf = (q: GoldenQuestion): string[] => (typeof q.reference === 'string' ? [q.reference] : q.reference);
 
@@ -18,7 +15,7 @@ function toResult(table: ArrowTable): ReferenceResult {
 }
 
 function runReference(engine: Engine, sql: string): ReferenceResult {
-  return toResult(engine.conn.query(capRows(sql)));
+  return toResult(engine.conn.query(wrap(stripTail(sql))));
 }
 
 function shapeProblem(q: GoldenQuestion): string | null {
@@ -46,7 +43,7 @@ function reportQuestion(engine: Engine, q: GoldenQuestion): boolean {
     const label = refs.length > 1 ? `  ref ${i + 1}:` : ' ';
     try {
       const { columns, rows } = runReference(engine, sql);
-      const count = rows.length > ROW_CAP ? `>${ROW_CAP} rows` : `${rows.length} ${rows.length === 1 ? 'row' : 'rows'}`;
+      const count = rows.length > MAX_ROWS ? `>${MAX_ROWS} rows` : `${rows.length} ${rows.length === 1 ? 'row' : 'rows'}`;
       if (rows.length === 0) {
         passed = false;
         console.log(`${label} FAIL 0 rows`);

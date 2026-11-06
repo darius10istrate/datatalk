@@ -7,11 +7,12 @@ import type { Field } from 'apache-arrow';
 import { batchToRows, isNumeric, type Cell } from '../../shared/cells';
 import { CREATE_VIEW, DATA_FILE, DUCKDB_VERSION, EXTENSIONS, LOCKDOWN } from '../../shared/lockdown';
 import { sqlString } from '../../shared/sql';
+import { message, SERIALIZE_SQL, validate, type Rejection } from '../../shared/validate';
+import { MAX_ROWS } from '../../shared/wrap';
 import { checkAsset, SETUP_HINT } from './asset';
 
 export const DATA_URL = `/data/${DATA_FILE}`;
 export const QUERY_TIMEOUT_MS = 30_000;
-export const MAX_ROWS = 1_000;
 
 export type LoadProgress =
   | { stage: 'engine' }
@@ -29,7 +30,16 @@ export class QueryStopped extends Error {
   }
 }
 
-let conn: duckdb.AsyncDuckDBConnection | null = null;
+export class QueryRejected extends Error {
+  constructor(readonly rejection: Rejection) {
+    super(message(rejection));
+    this.name = 'QueryRejected';
+  }
+}
+
+type Engine = { conn: duckdb.AsyncDuckDBConnection; serializer: duckdb.AsyncPreparedStatement };
+
+let engine: Engine | null = null;
 let loading: Promise<{ rows: number }> | null = null;
 let busy = false;
 
@@ -69,8 +79,9 @@ async function load(onProgress: (p: LoadProgress) => void): Promise<{ rows: numb
   onProgress({ stage: 'lock' });
   for (const s of LOCKDOWN) await c.query(s);
 
+  const serializer = await c.prepare(SERIALIZE_SQL);
   const count = await c.query('SELECT count(*)::INTEGER AS n FROM trips');
-  conn = c;
+  engine = { conn: c, serializer };
   return { rows: Number(count.getChildAt(0)!.get(0)) };
 }
 
@@ -98,9 +109,9 @@ async function fetchWithProgress(url: string, onProgress: (loaded: number, total
 }
 
 export async function runQuery(sql: string, signal: AbortSignal): Promise<Result> {
-  if (!conn) throw new Error('The engine is still loading');
+  if (!engine) throw new Error('The engine is still loading');
   if (busy) throw new Error('A query is already running');
-  const c = conn;
+  const { conn: c, serializer } = engine;
   busy = true;
   const t0 = performance.now();
   let stopped: QueryStopped | null = null;
@@ -113,8 +124,11 @@ export async function runQuery(sql: string, signal: AbortSignal): Promise<Result
   signal.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(() => stop('timeout'), QUERY_TIMEOUT_MS);
   try {
+    const verdict = await validate(sql, async (s) => (await serializer.query(s)).getChildAt(0)!.get(0));
+    if (!verdict.ok) throw new QueryRejected(verdict.rejection);
+    if (stopped) throw stopped;
     if (signal.aborted) throw new QueryStopped('cancelled');
-    const reader = await c.send(sql);
+    const reader = await c.send(verdict.run);
     const rows: Cell[][] = [];
     let fields: Field[] | null = null;
     for await (const batch of reader) {

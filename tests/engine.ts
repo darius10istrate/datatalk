@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import type * as Duck from '@duckdb/duckdb-wasm/blocking';
 import { CREATE_VIEW, DATA_FILE, EXTENSIONS, LOCKDOWN } from '../shared/lockdown.ts';
 import { sqlString } from '../shared/sql.ts';
+import { SERIALIZE_SQL } from '../shared/validate.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const PARQUET_PATH = join(ROOT, 'public', 'data', DATA_FILE);
@@ -54,6 +55,7 @@ export type Row = Record<string, unknown>;
 
 export type Engine = {
   query(sql: string): Row[];
+  serialize(sql: string): unknown;
   conn: Duck.DuckDBConnection;
   close(): void;
 };
@@ -65,7 +67,7 @@ export function openEngine(): Promise<Engine> {
   return cached;
 }
 
-async function createEngine(): Promise<Engine> {
+export async function createEngine(): Promise<Engine> {
   installLocalXhr();
   const db = await duckdb.createDuckDB(
     {
@@ -84,11 +86,14 @@ async function createEngine(): Promise<Engine> {
   db.registerFileBuffer(DATA_FILE, new Uint8Array(readFileSync(PARQUET_PATH)));
   run(CREATE_VIEW);
   for (const s of LOCKDOWN) run(s);
+  const serializer = conn.prepare(SERIALIZE_SQL);
 
   return {
     query: (sql) => run(sql).toArray().map((r) => (r as { toJSON(): Row }).toJSON()),
+    serialize: (sql) => serializer.query(sql).getChildAt(0)!.get(0),
     conn,
     close: () => {
+      serializer.close();
       conn.close();
       db.reset();
     },
