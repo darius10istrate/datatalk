@@ -1,0 +1,44 @@
+:root {
+  --bg: #fafaf9;
+  --fg: #1c1917;
+  --muted: #78716c;
+  --line: #e7e5e4;
+  --panel: #ffffff;
+  --ok: #15803d;
+  --err: #b91c1c;
+  --accent: #1d4ed8;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  color: var(--fg);
+  background: var(--bg);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0c0a09;
+    --fg: #e7e5e4;
+    --muted: #a8a29e;
+    --line: #292524;
+    --panel: #1c1917;
+    --ok: #4ade80;
+    --err: #f87171;
+    --accent: #60a5fa;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); }
+main { max-width: 1100px; margin: 0 auto; padding: 16px; display: grid; gap: 12px; }
+.status { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); font-weight: 600; }
+.panel { padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); display: grid; gap: 8px; min-width: 0; }
+label { font-size: 13px; font-weight: 600; color: var(--muted); }
+textarea { width: 100%; font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; padding: 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); resize: vertical; }
+.actions { display: flex; align-items: center; gap: 12px; }
+button { font: inherit; font-weight: 600; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--accent); background: var(--accent); color: #fff; cursor: pointer; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+.muted { color: var(--muted); font-weight: 400; }
+.ok { color: var(--ok); }
+.err { color: var(--err); white-space: pre-wrap; }
+p { margin: 0; }
+.table-wrap { overflow: auto; max-height: 60vh; }
+table { border-collapse: collapse; font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; width: max-content; min-width: 100%; }
+th, td { text-align: left; padding: 4px 10px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--panel); }
+th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; }

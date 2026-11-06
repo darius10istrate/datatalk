@@ -5,7 +5,7 @@ A user asks a question in plain English. A Cloudflare Worker sends schema + snip
 ## 1. What I'm building
 
 - **SPA** (React + TS): question box, editable SQL (CodeMirror), rationale, snippets used, results table, and every loading, error and empty state.
-- **Worker** `POST /api/sql`: BM25 picks the top 4 of 15–25 hand-written snippets. OpenRouter returns strict JSON: `sql` + `rationale`, or `cannot_answer` + `reason`. Model `openai/gpt-oss-120b`; `anthropic/claude-haiku-5.5` is one env var away.
+- **Worker** `POST /api/sql`: BM25 picks the top 4 of 15–25 hand-written snippets. OpenRouter returns strict JSON: `sql` + `rationale`, or `cannot_answer` + `reason`. Model `google/gemini-3.7-flash`; `anthropic/claude-haiku-5.5` is one env var away.
 - **Data:** NYC yellow taxi, January 2024 only (other months → `cannot_answer`). `npm run setup` writes 2,964,606 decoded rows (43.9 MB Parquet), mounted in the browser as a view.
 - **Validator:** `json_serialize_sql(?::VARCHAR)` on the raw **and** the wrapped SQL, then a generic AST walk: one statement, only `trips` or an unqualified CTE, no `TABLE_FUNCTION`, no denylisted function. Then a locked engine, Cancel and a 30 s timeout.
 - **One pipeline** (ask → validate → wrap → run → one coded retry) for the UI and golden runner, on DuckDB-WASM 1.32.0 everywhere. The Worker writes the retry text, so no errors or values reach the LLM.
@@ -46,3 +46,9 @@ A user asks a question in plain English. A Cloudflare Worker sends schema + snip
 - **Internet only for install and setup;** then the only call is Worker → OpenRouter.
 - **A Parquet view, not a table** (44 KiB vs. 526 MiB): pruning pays off in memory, not download.
 - **Threat model:** the LLM's output (wrong or steered) and an assessor probing the validator via the UI, not a user's own devtools.
+
+## Divergences
+
+- **Phase 1, Node engine extensions:** DuckDB-WASM 1.32.0's Node blocking build fetches extensions with a synchronous `XMLHttpRequest`, which Node lacks (`LOAD parquet` hangs). `tests/engine.ts` adds a ~30-line sync XHR that only reads `*.duckdb_extension.wasm` under `public/ext`, so Node loads the same extension files the browser loads from `/ext`.
+- **Phase 1, local secrets:** `.env` / `.env.example` instead of `.dev.vars`. The Cloudflare Vite plugin passes `.env` to the Worker, and Vite sends only `VITE_`-prefixed variables to the browser (tested: the key never reached the client bundle). A `.dev.vars` file would silently disable `.env`, so it stays gitignored and unused.
+- **Phase 1, extension platform:** `npm run setup` downloads only the `wasm_eh` extensions; `wasm_mvp` is deferred (design question 2: added only if a browser picks the `mvp` bundle). The MVP build reports `PRAGMA platform` = `wasm_mvp` and would request `/ext/v1.4.3/wasm_mvp/…`, which setup does not fill. Every current major browser supports Wasm exceptions and gets the `eh` bundle.

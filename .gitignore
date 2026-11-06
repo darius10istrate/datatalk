@@ -1,0 +1,14 @@
+node_modules/
+dist/
+public/data/
+public/ext/
+.cache/
+.env
+.dev.vars
+.wrangler/
+golden/out/
+.DS_Store
+.claude/
+.agents/
+docs/
+skills-lock.json
