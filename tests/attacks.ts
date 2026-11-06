@@ -103,6 +103,8 @@ export const ATTACKS: readonly Attack[] = [
   { category: 'Validator itself', expect: 'blocked', sql: 'DRОP VIEW trips' },
   { category: 'Validator itself', expect: 'allowed', sql: longLiteral },
 
+  { category: 'Known fail-open', expect: 'allowed', sql: 'SELECT version() AS v, current_database() AS db' },
+
   { category: 'Known false positive', expect: 'blocked', sql: 'SELECT * FROM (PIVOT trips ON payment_type USING count(*))' },
   { category: 'Known false positive', expect: 'blocked', sql: 'SELECT * FROM generate_series(1, 3)' },
   { category: 'Known false positive', expect: 'blocked', sql: 'SELECT * FROM unnest([1, 2, 3])' },

@@ -1,6 +1,5 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { join } from 'node:path';
 import { parseEnv } from 'node:util';
 import { CONTEXTS, httpAsk, isContext, isServiceError, SQL_ENDPOINT, type Context } from '../shared/api.ts';
 import { DUCKDB_VERSION } from '../shared/lockdown.ts';
@@ -9,13 +8,13 @@ import { fingerprintSql } from '../shared/sql.ts';
 import { MAX_ROWS } from '../shared/wrap.ts';
 import { engineAdapters, openEngine, type Engine } from '../tests/engine.ts';
 import { check, type Observed, type Table } from './check.ts';
+import { HOLDOUT_QUESTIONS } from './holdout.ts';
 import { DEV_QUESTIONS, type GoldenQuestion } from './questions.ts';
+import { OUT_DIR, ROOT, type DatasetInfo, type GoldenReport } from './report.ts';
 
-const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const OUT_DIR = join(ROOT, 'golden', 'out');
 const DEFAULT_URL = 'http://localhost:5173';
 
-const SETS: Record<string, readonly GoldenQuestion[]> = { dev: DEV_QUESTIONS };
+const SETS: Record<string, readonly GoldenQuestion[]> = { dev: DEV_QUESTIONS, holdout: HOLDOUT_QUESTIONS };
 
 const referencesOf = (q: GoldenQuestion): string[] => (typeof q.reference === 'string' ? [q.reference] : q.reference);
 
@@ -33,8 +32,6 @@ const describeRow = (columns: readonly unknown[], row: readonly unknown[] | unde
   row ? columns.map((c, i) => `${String(c)}=${row[i] === null ? 'NULL' : String(row[i])}`).join(', ') : '(none)';
 
 const failureText = (run: RunOutcome) => (run.kind === 'rows' ? '' : run.message.split('\n')[0]!);
-
-type DatasetInfo = { version: string; trips: number; fingerprint: string };
 
 function datasetInfo(engine: Engine): DatasetInfo {
   const version = String(engine.query('SELECT version() AS v')[0]!.v);
@@ -168,7 +165,7 @@ function parseArgs(argv: readonly string[]): Args | string {
   const contexts = (valueOf(argv, '--context') ?? 'top4').split(',').map((s) => s.trim());
   const runs = Number(valueOf(argv, '--runs') ?? '3');
   const url = (valueOf(argv, '--url') ?? DEFAULT_URL).replace(/\/+$/, '');
-  if (!SETS[set]) return `unknown set "${set}"; available: ${Object.keys(SETS).join(', ')} (the holdout arrives in phase 6)`;
+  if (!SETS[set]) return `unknown set "${set}"; available: ${Object.keys(SETS).join(', ')}`;
   if (!contexts.every(isContext)) return `--context takes ${CONTEXTS.join(' | ')}, or a comma-separated list`;
   if (!Number.isInteger(runs) || runs < 1) return '--runs takes a positive integer';
   return { set, contexts: contexts as Context[], runs, url, reference: argv.includes('--reference') };
@@ -267,7 +264,7 @@ async function modelMode(args: Args, questions: readonly GoldenQuestion[]): Prom
       const served = [...new Set(results.flatMap((r) => r.runs.map((x) => x.model)).filter((m): m is string => m !== null))];
       mkdirSync(OUT_DIR, { recursive: true });
       const file = join(OUT_DIR, `${args.set}-${arm}-${date.slice(0, 19).replaceAll(':', '')}.json`);
-      const report = { set: args.set, arm, runs: args.runs, date, model_configured: model, models_served: served, provider, dataset: info, results };
+      const report: GoldenReport<QuestionRecord> = { set: args.set, arm, runs: args.runs, date, model_configured: model, models_served: served, provider, dataset: info, results };
       writeFileSync(file, `${JSON.stringify(report, null, 2)}\n`);
       console.log(`served by ${served.join(', ') || '(no model answered)'} · wrote ${file}`);
     }
@@ -284,7 +281,7 @@ async function modelMode(args: Args, questions: readonly GoldenQuestion[]): Prom
 async function main(argv: readonly string[]): Promise<number> {
   const args = parseArgs(argv);
   if (typeof args === 'string') {
-    console.error(`${args}\nusage: npm run golden -- [--reference] [--set dev] [--context none|all|top4] [--runs 3] [--url ${DEFAULT_URL}]`);
+    console.error(`${args}\nusage: npm run golden -- [--reference] [--set dev|holdout] [--context none|all|top4] [--runs 3] [--url ${DEFAULT_URL}]`);
     return 2;
   }
   const questions = SETS[args.set]!;
