@@ -1,158 +1,183 @@
-import { useEffect, useRef, useState } from 'react';
-import { validateAndRun, type RunOutcome } from '../shared/pipeline';
-import { engineAdapters, init, type LoadProgress, type Result } from './db/duckdb';
+import { useCallback, useEffect, useReducer, useRef, useState, type Dispatch, type RefObject } from 'react';
+import { httpAsk, SQL_ENDPOINT } from '../shared/api';
+import { askAndRun, errorText, validateAndRun, type Adapters, type AskOutcome, type EngineAdapters, type RunOutcome } from '../shared/pipeline';
+import { QuestionBox } from './components/QuestionBox';
+import { AskingBar, ResultsTable, RunningBar } from './components/ResultsTable';
+import { SqlEditor } from './components/SqlEditor';
+import { StatusBar } from './components/StatusBar';
+import { init, runQuery, serialize, type Loaded } from './db/duckdb';
+import { initialState, isBusy, MESSAGES, reducer, shown, stateMessage, type Action, type Explained, type Retry } from './state';
 
-type Load = { kind: 'loading'; progress: LoadProgress } | { kind: 'ready'; rows: number } | { kind: 'failed'; message: string };
+const INITIAL_SQL = 'SELECT payment_type, count(*) AS trips, round(avg(tip_amount), 2) AS avg_tip\nFROM trips\nGROUP BY ALL\nORDER BY trips DESC';
 
-type Run =
-  | { kind: 'idle' }
-  | { kind: 'running'; started: number }
-  | { kind: 'done'; result: Result }
-  | { kind: 'stopped'; message: string }
-  | { kind: 'rejected'; message: string }
-  | { kind: 'error'; message: string };
+const askService = httpAsk(SQL_ENDPOINT);
 
-const fmt = (n: number) => n.toLocaleString('en-US');
+const failedRun = (e: unknown): RunOutcome => ({ kind: 'query_error', message: errorText(e), problem: null });
 
-function toRun(outcome: RunOutcome): Run {
-  switch (outcome.kind) {
-    case 'rows':
-      return { kind: 'done', result: outcome.result };
-    case 'stopped':
-      return { kind: 'stopped', message: outcome.message };
-    case 'rejected':
-      return { kind: 'rejected', message: outcome.message };
-    case 'query_error':
-      return { kind: 'error', message: outcome.message };
-  }
+const serviceDown: AskOutcome = { kind: 'service_error', answer: { error: 'upstream' }, retried: false };
+
+const RETRY_NOTES: Record<Retry, string | null> = { none: null, pending: 'second try', fixed: 'fixed on a second try', unfixed: 'second try' };
+
+function engineFor(dispatch: Dispatch<Action>, started: RefObject<number>): EngineAdapters {
+  return {
+    serialize,
+    run: (wrapped, signal) => {
+      started.current = performance.now();
+      dispatch({ type: 'running' });
+      return runQuery(wrapped, signal);
+    },
+  };
 }
 
-function loadingText(p: LoadProgress): string {
-  if (p.stage === 'engine') return 'Starting DuckDB…';
-  if (p.stage === 'lock') return 'Locking the engine…';
-  const mb = (n: number) => (n / 1e6).toFixed(1);
-  return p.total ? `Loading trips ${mb(p.loaded)} / ${mb(p.total)} MB` : `Loading trips ${mb(p.loaded)} MB`;
+function adaptersFor(dispatch: Dispatch<Action>, started: RefObject<number>): Adapters {
+  return {
+    ...engineFor(dispatch, started),
+    ask: async (request, signal) => {
+      dispatch({ type: 'asking' });
+      const response = await askService(request, signal);
+      if ('kind' in response && response.kind === 'sql') dispatch({ type: 'answered', answer: response, retried: request.problem !== undefined });
+      return response;
+    },
+  };
 }
 
 export function App() {
-  const [load, setLoad] = useState<Load>({ kind: 'loading', progress: { stage: 'engine' } });
-  const [sql, setSql] = useState('SELECT payment_type, count(*) AS trips, round(avg(tip_amount), 2) AS avg_tip\nFROM trips\nGROUP BY ALL\nORDER BY trips DESC');
-  const [run, setRun] = useState<Run>({ kind: 'idle' });
+  const [state, dispatch] = useReducer(reducer, initialState);
+  const [dataset, setDataset] = useState<Loaded | null>(null);
   const [now, setNow] = useState(0);
+  const started = useRef(0);
   const abort = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    init((progress) => setLoad({ kind: 'loading', progress }))
-      .then(({ rows }) => setLoad({ kind: 'ready', rows }))
-      .catch((e: unknown) => setLoad({ kind: 'failed', message: e instanceof Error ? e.message : String(e) }));
+    init((progress) => dispatch({ type: 'progress', progress }))
+      .then((loaded) => {
+        setDataset(loaded);
+        dispatch({ type: 'loaded', sql: INITIAL_SQL });
+      })
+      .catch((e: unknown) => dispatch({ type: 'load_failed', message: errorText(e) }));
   }, []);
 
+  const running = state.phase === 'running';
   useEffect(() => {
-    if (run.kind !== 'running') return;
+    if (!running) return;
+    setNow(performance.now());
     const id = setInterval(() => setNow(performance.now()), 100);
     return () => clearInterval(id);
-  }, [run.kind]);
+  }, [running]);
 
-  const ready = load.kind === 'ready';
-  const running = run.kind === 'running';
+  const busy = isBusy(state);
+  const current = shown(state);
 
-  async function onRun() {
-    if (!ready || running || !sql.trim()) return;
+  const begin = useCallback(() => {
+    if (abort.current) return null;
     const controller = new AbortController();
     abort.current = controller;
-    const started = performance.now();
-    setNow(started);
-    setRun({ kind: 'running', started });
+    return controller;
+  }, []);
+
+  const onRun = useCallback(async () => {
+    if (!current || isBusy(state) || !current.sql.trim()) return;
+    const controller = begin();
+    if (!controller) return;
+    const sql = current.sql;
+    let outcome: RunOutcome;
     try {
-      setRun(toRun(await validateAndRun(sql, engineAdapters, controller.signal)));
+      outcome = await validateAndRun(sql, engineFor(dispatch, started), controller.signal);
     } catch (e) {
-      setRun({ kind: 'error', message: e instanceof Error ? e.message : String(e) });
+      outcome = failedRun(e);
     } finally {
       abort.current = null;
     }
-  }
+    dispatch({ type: 'ran', sql, outcome });
+  }, [begin, current, state]);
+
+  const onAsk = useCallback(
+    async (question: string) => {
+      if (!current || isBusy(state)) return;
+      const controller = begin();
+      if (!controller) return;
+      try {
+        dispatch({ type: 'asked', outcome: await askAndRun(question, adaptersFor(dispatch, started), controller.signal) });
+      } catch {
+        dispatch({ type: 'asked', outcome: serviceDown });
+      } finally {
+        abort.current = null;
+      }
+    },
+    [begin, current, state],
+  );
+
+  const onEdit = useCallback((sql: string) => dispatch({ type: 'edit', sql }), []);
 
   return (
     <main>
-      <header className="status">
-        <span>NYC Yellow Taxi · January 2024</span>
-        {load.kind === 'loading' && <span className="muted">{loadingText(load.progress)}</span>}
-        {load.kind === 'ready' && <span className="ok">● Ready · {fmt(load.rows)} trips</span>}
-        {load.kind === 'failed' && <span className="err">Load failed: {load.message}</span>}
-      </header>
+      <StatusBar state={state} rows={dataset?.rows ?? null} drift={dataset?.drift ?? []} />
 
-      <section className="panel">
-        <label htmlFor="sql">SQL</label>
-        <textarea
-          id="sql"
-          value={sql}
-          spellCheck={false}
-          rows={8}
-          onChange={(e) => setSql(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-              e.preventDefault();
-              void onRun();
-            }
-          }}
-        />
-        <div className="actions">
-          {running ? (
-            <>
-              <button type="button" onClick={() => abort.current?.abort()}>
-                Cancel
-              </button>
-              <span className="muted">Running… {((now - run.started) / 1000).toFixed(1)} s</span>
-            </>
-          ) : (
-            <button type="button" onClick={() => void onRun()} disabled={!ready || !sql.trim()}>
-              Run ▶
-            </button>
+      <QuestionBox enabled={current !== null && !busy} asking={state.phase === 'asking'} onAsk={(q) => void onAsk(q)} />
+
+      {current && (
+        <SqlEditor
+          value={current.sql}
+          onChange={onEdit}
+          onRun={() => void onRun()}
+          canRun={!busy && current.sql.trim() !== ''}
+          readOnly={busy}
+          verdict={
+            state.phase === 'rejected' ? (
+              <span className="err" role="alert">
+                {state.message}
+              </span>
+            ) : current.validated ? (
+              <span className="ok">{MESSAGES.readOnly}</span>
+            ) : null
+          }
+        >
+          {current.explained && <Explanation explained={current.explained} sql={current.sql} />}
+          {state.phase === 'query_error' && (
+            <p className="err" role="alert">
+              {state.message}
+            </p>
           )}
-        </div>
-      </section>
+        </SqlEditor>
+      )}
 
-      <section className="panel">
-        {run.kind === 'stopped' && <p className="muted">{run.message}</p>}
-        {run.kind === 'rejected' && <p className="err">{run.message}</p>}
-        {run.kind === 'error' && <p className="err">{run.message}</p>}
-        {run.kind === 'done' && <ResultsTable result={run.result} />}
-      </section>
+      {current && (
+        <section className="panel" aria-live="polite">
+          {state.phase === 'asking' && <AskingBar onCancel={() => abort.current?.abort()} />}
+          {state.phase === 'running' && <RunningBar seconds={Math.max(0, now - started.current) / 1000} onCancel={() => abort.current?.abort()} />}
+          {state.phase === 'stopped' && <p className="muted">{stateMessage(state)}</p>}
+          {state.phase === 'cannot_answer' && (
+            <p className="warn" role="alert">
+              Can't answer: {state.message}
+            </p>
+          )}
+          {state.phase === 'service_down' && (
+            <p className="err" role="alert">
+              {state.message}; the editor still runs hand-written SQL.
+            </p>
+          )}
+          {(state.phase === 'ready' || state.phase === 'asking') && state.result && <ResultsTable result={state.result} />}
+          {state.phase === 'ready' && !state.result && <p className="muted">Ask a question or run the SQL above.</p>}
+        </section>
+      )}
     </main>
   );
 }
 
-function ResultsTable({ result }: { result: Result }) {
-  if (result.rows.length === 0) return <p className="muted">No rows matched · {result.ms} ms</p>;
+function Explanation({ explained, sql }: { explained: Explained; sql: string }) {
+  const { answer, retry } = explained;
+  const notes = [RETRY_NOTES[retry], sql !== answer.sql && 'SQL edited since'].filter(Boolean).join(' · ');
   return (
-    <>
+    <div className="why">
+      {answer.rationale && (
+        <p>
+          <span className="muted">Why:</span> {answer.rationale}
+        </p>
+      )}
       <p className="muted">
-        {result.truncated ? `Showing the first ${fmt(result.rows.length)} rows` : `${fmt(result.rows.length)} rows`} · {result.ms} ms
+        Context used: {answer.snippet_ids.length ? answer.snippet_ids.join(' · ') : 'schema only'}
+        {notes && ` (${notes})`}
       </p>
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              {result.columns.map((c, i) => (
-                <th key={i} className={c.numeric ? 'num' : undefined}>
-                  {c.name}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {result.rows.map((row, i) => (
-              <tr key={i}>
-                {row.map((cell, j) => (
-                  <td key={j} className={result.columns[j]?.numeric ? 'num' : undefined}>
-                    {cell === null ? <span className="muted">NULL</span> : String(cell)}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </>
+    </div>
   );
 }

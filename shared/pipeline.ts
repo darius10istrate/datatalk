@@ -10,6 +10,7 @@ import {
   type SqlResponse,
 } from './api.ts';
 import type { Cell } from './cells.ts';
+import { STOP_MESSAGES } from './limits.ts';
 import { message, validate, type Rejection } from './validate.ts';
 
 export type ResultColumn = { name: string; numeric: boolean };
@@ -29,7 +30,7 @@ export class QueryStopped extends Error {
 }
 
 export type Adapters = {
-  ask(request: SqlRequest): Promise<SqlResponse>;
+  ask(request: SqlRequest, signal: AbortSignal): Promise<SqlResponse>;
   serialize(sql: string): Promise<unknown> | unknown;
   run(sql: string, signal: AbortSignal): Promise<Result>;
 };
@@ -45,7 +46,8 @@ export type RunOutcome =
 export type AskOutcome =
   | { kind: 'answered'; answer: SqlAnswer; run: RunOutcome; retried: boolean }
   | { kind: 'cannot_answer'; answer: CannotAnswer; retried: boolean }
-  | { kind: 'service_error'; answer: ServiceError; retried: boolean };
+  | { kind: 'service_error'; answer: ServiceError; retried: boolean }
+  | { kind: 'stopped'; reason: 'cancelled'; message: string; retried: boolean };
 
 const ERROR_PROBLEMS: readonly [RegExp, (match: RegExpMatchArray) => Problem][] = [
   [/Referenced column "([^"]*)" not found/, (m) => problemOf('unknown_column', m[1])],
@@ -65,7 +67,7 @@ export function problemFromRejection(r: Rejection): Problem {
   return 'name' in r ? problemOf(r.code, r.name) : problemOf(r.code);
 }
 
-const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+export const errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
 export async function validateAndRun(sql: string, adapters: EngineAdapters, signal: AbortSignal): Promise<RunOutcome> {
   const verdict = await validate(sql, async (s) => adapters.serialize(s));
@@ -85,9 +87,9 @@ export function retryProblem(run: RunOutcome): Problem | null {
   return null;
 }
 
-async function safeAsk(adapters: Adapters, request: SqlRequest): Promise<SqlResponse> {
+async function safeAsk(adapters: Adapters, request: SqlRequest, signal: AbortSignal): Promise<SqlResponse> {
   try {
-    return await adapters.ask(request);
+    return await adapters.ask(request, signal);
   } catch {
     return { error: 'upstream' };
   }
@@ -97,11 +99,14 @@ function notAnswered(answer: CannotAnswer | ServiceError, retried: boolean): Ask
   return 'error' in answer ? { kind: 'service_error', answer, retried } : { kind: 'cannot_answer', answer, retried };
 }
 
+const cancelledAsk = (retried: boolean): AskOutcome => ({ kind: 'stopped', reason: 'cancelled', message: STOP_MESSAGES.cancelled, retried });
+
 export type AskOptions = { context?: Context };
 
 export async function askAndRun(question: string, adapters: Adapters, signal: AbortSignal, options: AskOptions = {}): Promise<AskOutcome> {
   const request: SqlRequest = options.context ? { question, context: options.context } : { question };
-  const first = await safeAsk(adapters, request);
+  const first = await safeAsk(adapters, request, signal);
+  if (signal.aborted) return cancelledAsk(false);
   if (!('kind' in first) || first.kind !== 'sql') return notAnswered(first, false);
 
   const firstRun = await validateAndRun(first.sql, adapters, signal);
@@ -109,7 +114,8 @@ export async function askAndRun(question: string, adapters: Adapters, signal: Ab
   if (!problem || signal.aborted || first.sql.length > MAX_PREVIOUS_SQL_LENGTH)
     return { kind: 'answered', answer: first, run: firstRun, retried: false };
 
-  const second = await safeAsk(adapters, { ...request, previous_sql: first.sql, problem });
+  const second = await safeAsk(adapters, { ...request, previous_sql: first.sql, problem }, signal);
+  if (signal.aborted) return cancelledAsk(true);
   if (!('kind' in second) || second.kind !== 'sql') {
     if ('kind' in second) return notAnswered(second, true);
     return { kind: 'answered', answer: first, run: firstRun, retried: true };

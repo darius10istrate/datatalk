@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it } from 'vitest';
-import type { SqlRequest, SqlResponse } from '../shared/api.ts';
+import { httpAsk, type SqlRequest, type SqlResponse } from '../shared/api.ts';
 import { askAndRun, problemFromError, QueryStopped, validateAndRun, type Adapters, type EngineAdapters } from '../shared/pipeline.ts';
 import { engineAdapters, openEngine } from './engine.ts';
 
@@ -119,6 +119,49 @@ describe('askAndRun', () => {
     const { adapters } = scripted(sql('SELECT fare FROM trips'), { error: 'upstream' });
     const outcome = await askAndRun('q', adapters, signal);
     expect(outcome).toMatchObject({ kind: 'answered', retried: true, answer: { sql: 'SELECT fare FROM trips' }, run: { kind: 'query_error' } });
+  });
+
+  it('stops as cancelled when the ask is aborted', async () => {
+    const controller = new AbortController();
+    const seen: AbortSignal[] = [];
+    const adapters: Adapters = {
+      ...engine,
+      ask: (_request, askSignal) => {
+        seen.push(askSignal);
+        controller.abort();
+        return Promise.reject(new DOMException('aborted', 'AbortError'));
+      },
+    };
+    const outcome = await askAndRun('q', adapters, controller.signal);
+    expect(seen).toEqual([controller.signal]);
+    expect(outcome).toEqual({ kind: 'stopped', reason: 'cancelled', message: 'Cancelled', retried: false });
+  });
+
+  it('stops as cancelled when the retry ask is aborted', async () => {
+    const controller = new AbortController();
+    let calls = 0;
+    const adapters: Adapters = {
+      ...engine,
+      ask: async () => {
+        calls += 1;
+        if (calls === 1) return sql('SELECT fare FROM trips');
+        controller.abort();
+        return { error: 'upstream' };
+      },
+    };
+    const outcome = await askAndRun('q', adapters, controller.signal);
+    expect(outcome).toMatchObject({ kind: 'stopped', reason: 'cancelled', retried: true });
+  });
+
+  it('httpAsk passes the abort signal to fetch', async () => {
+    const controller = new AbortController();
+    let received: AbortSignal | null | undefined;
+    const fetcher = (async (_url: string, init?: RequestInit) => {
+      received = init?.signal;
+      return new Response(JSON.stringify({ error: 'upstream' }));
+    }) as typeof fetch;
+    await httpAsk('/api/sql', fetcher)({ question: 'q' }, controller.signal);
+    expect(received).toBe(controller.signal);
   });
 
   it('passes cannot_answer and service errors through', async () => {

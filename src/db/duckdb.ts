@@ -7,31 +7,29 @@ import type { Field } from 'apache-arrow';
 import { batchToRows, isNumeric, type Cell } from '../../shared/cells';
 import { CREATE_VIEW, DATA_FILE, DUCKDB_VERSION, EXTENSIONS, LOCKDOWN } from '../../shared/lockdown';
 import { sqlString } from '../../shared/sql';
-import { QueryStopped, type EngineAdapters, type Result, type StopReason } from '../../shared/pipeline';
+import { STOP_MESSAGES, QUERY_TIMEOUT_MS } from '../../shared/limits';
+import { errorText, QueryStopped, type Result, type StopReason } from '../../shared/pipeline';
 import { SERIALIZE_SQL } from '../../shared/validate';
 import { MAX_ROWS } from '../../shared/wrap';
+import { schemaDrift } from '../../shared/schema';
+import type { LoadProgress } from './progress';
 import { checkAsset, SETUP_HINT } from './asset';
 
 export const DATA_URL = `/data/${DATA_FILE}`;
-export const QUERY_TIMEOUT_MS = 30_000;
-
-export type LoadProgress =
-  | { stage: 'engine' }
-  | { stage: 'data'; loaded: number; total: number }
-  | { stage: 'lock' };
 
 export type { Result };
 
-const stoppedBy = (reason: StopReason) =>
-  new QueryStopped(reason, reason === 'timeout' ? `Query stopped after ${QUERY_TIMEOUT_MS / 1000} s` : 'Cancelled');
+export type Loaded = { rows: number; drift: string[] };
+
+const stoppedBy = (reason: StopReason) => new QueryStopped(reason, STOP_MESSAGES[reason]);
 
 type Engine = { conn: duckdb.AsyncDuckDBConnection; serializer: duckdb.AsyncPreparedStatement };
 
 let engine: Engine | null = null;
-let loading: Promise<{ rows: number }> | null = null;
+let loading: Promise<Loaded> | null = null;
 let busy = false;
 
-export function init(onProgress: (p: LoadProgress) => void): Promise<{ rows: number }> {
+export function init(onProgress: (p: LoadProgress) => void): Promise<Loaded> {
   loading ??= load(onProgress).catch((e: unknown) => {
     loading = null;
     throw e;
@@ -39,7 +37,7 @@ export function init(onProgress: (p: LoadProgress) => void): Promise<{ rows: num
   return loading;
 }
 
-async function load(onProgress: (p: LoadProgress) => void): Promise<{ rows: number }> {
+async function load(onProgress: (p: LoadProgress) => void): Promise<Loaded> {
   onProgress({ stage: 'engine' });
   const bundle = await duckdb.selectBundle({
     mvp: { mainModule: mvp_wasm, mainWorker: mvp_worker },
@@ -55,8 +53,7 @@ async function load(onProgress: (p: LoadProgress) => void): Promise<{ rows: numb
     try {
       await c.query(`LOAD ${ext}`);
     } catch (e) {
-      const reason = e instanceof Error ? e.message : String(e);
-      throw new Error(`Could not load the ${ext} extension from /ext/${DUCKDB_VERSION}. ${SETUP_HINT} (${reason})`);
+      throw new Error(`Could not load the ${ext} extension from /ext/${DUCKDB_VERSION}. ${SETUP_HINT} (${errorText(e)})`);
     }
   }
 
@@ -69,8 +66,14 @@ async function load(onProgress: (p: LoadProgress) => void): Promise<{ rows: numb
 
   const serializer = await c.prepare(SERIALIZE_SQL);
   const count = await c.query('SELECT count(*)::INTEGER AS n FROM trips');
+  const drift = import.meta.env.DEV ? await describeDrift(c) : [];
   engine = { conn: c, serializer };
-  return { rows: Number(count.getChildAt(0)!.get(0)) };
+  return { rows: Number(count.getChildAt(0)!.get(0)), drift };
+}
+
+async function describeDrift(c: duckdb.AsyncDuckDBConnection): Promise<string[]> {
+  const described = (await c.query('DESCRIBE trips')).toArray().map((r) => ({ name: String(r.column_name), type: String(r.column_type) }));
+  return schemaDrift(described);
 }
 
 async function fetchWithProgress(url: string, onProgress: (loaded: number, total: number) => void): Promise<Uint8Array> {
@@ -144,5 +147,3 @@ export async function runQuery(wrapped: string, signal: AbortSignal): Promise<Re
     busy = false;
   }
 }
-
-export const engineAdapters: EngineAdapters = { serialize, run: runQuery };

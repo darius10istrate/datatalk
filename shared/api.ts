@@ -62,13 +62,14 @@ export function parseSqlResponse(body: unknown): SqlResponse | null {
   return null;
 }
 
-export function httpAsk(endpoint: string, fetcher: typeof fetch = fetch): (request: SqlRequest) => Promise<SqlResponse> {
-  return async (request) => {
+export function httpAsk(endpoint: string, fetcher: typeof fetch = fetch): (request: SqlRequest, signal?: AbortSignal) => Promise<SqlResponse> {
+  return async (request, signal) => {
     try {
       const res = await fetcher(endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(request),
+        signal: signal ?? null,
       });
       return parseSqlResponse(await res.json()) ?? { error: 'upstream' };
     } catch {

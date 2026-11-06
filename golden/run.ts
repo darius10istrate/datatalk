@@ -130,6 +130,7 @@ function observe(outcome: AskOutcome): Observed {
 function outcomeLabel(outcome: AskOutcome): string {
   if (outcome.kind === 'answered') return outcome.run.kind;
   if (outcome.kind === 'service_error') return outcome.answer.error;
+  if (outcome.kind === 'stopped') return outcome.reason;
   return 'cannot_answer';
 }
 
@@ -150,6 +151,7 @@ function record(outcome: AskOutcome, references: readonly Table[], q: GoldenQues
     case 'cannot_answer':
       return { ...base, snippet_ids: outcome.answer.snippet_ids, model: outcome.answer.model, sql: null, rationale: null, reason: outcome.answer.reason, error: null };
     case 'service_error':
+    case 'stopped':
       return { ...base, snippet_ids: [], model: null, sql: null, rationale: null, reason: null, error: null };
   }
 }
