@@ -3,9 +3,12 @@ import { createRequire } from 'node:module';
 import { dirname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type * as Duck from '@duckdb/duckdb-wasm/blocking';
+import { batchToRows, isNumeric } from '../shared/cells.ts';
 import { CREATE_VIEW, DATA_FILE, EXTENSIONS, LOCKDOWN } from '../shared/lockdown.ts';
+import type { EngineAdapters } from '../shared/pipeline.ts';
 import { sqlString } from '../shared/sql.ts';
 import { SERIALIZE_SQL } from '../shared/validate.ts';
+import { MAX_ROWS } from '../shared/wrap.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const PARQUET_PATH = join(ROOT, 'public', 'data', DATA_FILE);
@@ -96,6 +99,25 @@ export async function createEngine(): Promise<Engine> {
       serializer.close();
       conn.close();
       db.reset();
+    },
+  };
+}
+
+export function engineAdapters(engine: Engine): EngineAdapters {
+  return {
+    serialize: (sql) => engine.serialize(sql),
+    run: async (sql) => {
+      const started = performance.now();
+      const table = engine.conn.query(sql);
+      const fields = table.schema.fields;
+      const rows = batchToRows(fields, table, MAX_ROWS + 1);
+      const truncated = rows.length > MAX_ROWS;
+      return {
+        columns: fields.map((f) => ({ name: f.name, numeric: isNumeric(f.type) })),
+        rows: truncated ? rows.slice(0, MAX_ROWS) : rows,
+        truncated,
+        ms: Math.round(performance.now() - started),
+      };
     },
   };
 }

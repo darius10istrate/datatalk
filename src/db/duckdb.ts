@@ -7,7 +7,8 @@ import type { Field } from 'apache-arrow';
 import { batchToRows, isNumeric, type Cell } from '../../shared/cells';
 import { CREATE_VIEW, DATA_FILE, DUCKDB_VERSION, EXTENSIONS, LOCKDOWN } from '../../shared/lockdown';
 import { sqlString } from '../../shared/sql';
-import { message, SERIALIZE_SQL, validate, type Rejection } from '../../shared/validate';
+import { QueryStopped, type EngineAdapters, type Result, type StopReason } from '../../shared/pipeline';
+import { SERIALIZE_SQL } from '../../shared/validate';
 import { MAX_ROWS } from '../../shared/wrap';
 import { checkAsset, SETUP_HINT } from './asset';
 
@@ -19,23 +20,10 @@ export type LoadProgress =
   | { stage: 'data'; loaded: number; total: number }
   | { stage: 'lock' };
 
-export type Column = { name: string; numeric: boolean };
+export type { Result };
 
-export type Result = { columns: Column[]; rows: Cell[][]; truncated: boolean; ms: number };
-
-export class QueryStopped extends Error {
-  constructor(readonly reason: 'cancelled' | 'timeout') {
-    super(reason === 'timeout' ? `Query stopped after ${QUERY_TIMEOUT_MS / 1000} s` : 'Cancelled');
-    this.name = 'QueryStopped';
-  }
-}
-
-export class QueryRejected extends Error {
-  constructor(readonly rejection: Rejection) {
-    super(message(rejection));
-    this.name = 'QueryRejected';
-  }
-}
+const stoppedBy = (reason: StopReason) =>
+  new QueryStopped(reason, reason === 'timeout' ? `Query stopped after ${QUERY_TIMEOUT_MS / 1000} s` : 'Cancelled');
 
 type Engine = { conn: duckdb.AsyncDuckDBConnection; serializer: duckdb.AsyncPreparedStatement };
 
@@ -108,27 +96,29 @@ async function fetchWithProgress(url: string, onProgress: (loaded: number, total
   return out;
 }
 
-export async function runQuery(sql: string, signal: AbortSignal): Promise<Result> {
+export async function serialize(sql: string): Promise<unknown> {
+  if (!engine) throw new Error('The engine is still loading');
+  return (await engine.serializer.query(sql)).getChildAt(0)!.get(0);
+}
+
+export async function runQuery(wrapped: string, signal: AbortSignal): Promise<Result> {
   if (!engine) throw new Error('The engine is still loading');
   if (busy) throw new Error('A query is already running');
-  const { conn: c, serializer } = engine;
+  const { conn: c } = engine;
   busy = true;
   const t0 = performance.now();
   let stopped: QueryStopped | null = null;
-  const stop = (reason: 'cancelled' | 'timeout') => {
+  const stop = (reason: StopReason) => {
     if (stopped) return;
-    stopped = new QueryStopped(reason);
+    stopped = stoppedBy(reason);
     void c.cancelSent();
   };
   const onAbort = () => stop('cancelled');
   signal.addEventListener('abort', onAbort, { once: true });
   const timer = setTimeout(() => stop('timeout'), QUERY_TIMEOUT_MS);
   try {
-    const verdict = await validate(sql, async (s) => (await serializer.query(s)).getChildAt(0)!.get(0));
-    if (!verdict.ok) throw new QueryRejected(verdict.rejection);
-    if (stopped) throw stopped;
-    if (signal.aborted) throw new QueryStopped('cancelled');
-    const reader = await c.send(verdict.run);
+    if (signal.aborted) throw stoppedBy('cancelled');
+    const reader = await c.send(wrapped);
     const rows: Cell[][] = [];
     let fields: Field[] | null = null;
     for await (const batch of reader) {
@@ -154,3 +144,5 @@ export async function runQuery(sql: string, signal: AbortSignal): Promise<Result
     busy = false;
   }
 }
+
+export const engineAdapters: EngineAdapters = { serialize, run: runQuery };

@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { DuckDBInstance } from '@duckdb/node-api';
 import { COLUMNS, schemaDrift } from '../shared/schema.ts';
 import { DUCKDB_VERSION, EXTENSIONS } from '../shared/lockdown.ts';
-import { sqlString } from '../shared/sql.ts';
+import { fingerprintSql, sqlString } from '../shared/sql.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const CACHE = join(ROOT, '.cache');
@@ -123,10 +123,7 @@ COPY (
     AND t.tpep_pickup_datetime <  TIMESTAMP '2024-02-01'
 ) TO ${sqlString(out)} (FORMAT parquet, COMPRESSION zstd)`;
 
-const FINGERPRINT_SQL = (file: string) => `
-SELECT count(*) AS n,
-       printf('%016x', (sum(hash(t)::HUGEINT) % 18446744073709551616::HUGEINT)::UBIGINT) AS fp
-FROM read_parquet(${sqlString(file)}) t`;
+const FINGERPRINT_SQL = (file: string) => fingerprintSql(`read_parquet(${sqlString(file)})`);
 
 async function stepBuild(): Promise<void> {
   const instance = await DuckDBInstance.create(':memory:');

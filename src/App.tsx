@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { init, QueryRejected, QueryStopped, runQuery, type LoadProgress, type Result } from './db/duckdb';
+import { validateAndRun, type RunOutcome } from '../shared/pipeline';
+import { engineAdapters, init, type LoadProgress, type Result } from './db/duckdb';
 
 type Load = { kind: 'loading'; progress: LoadProgress } | { kind: 'ready'; rows: number } | { kind: 'failed'; message: string };
 
@@ -12,6 +13,19 @@ type Run =
   | { kind: 'error'; message: string };
 
 const fmt = (n: number) => n.toLocaleString('en-US');
+
+function toRun(outcome: RunOutcome): Run {
+  switch (outcome.kind) {
+    case 'rows':
+      return { kind: 'done', result: outcome.result };
+    case 'stopped':
+      return { kind: 'stopped', message: outcome.message };
+    case 'rejected':
+      return { kind: 'rejected', message: outcome.message };
+    case 'query_error':
+      return { kind: 'error', message: outcome.message };
+  }
+}
 
 function loadingText(p: LoadProgress): string {
   if (p.stage === 'engine') return 'Starting DuckDB…';
@@ -50,11 +64,9 @@ export function App() {
     setNow(started);
     setRun({ kind: 'running', started });
     try {
-      setRun({ kind: 'done', result: await runQuery(sql, controller.signal) });
+      setRun(toRun(await validateAndRun(sql, engineAdapters, controller.signal)));
     } catch (e) {
-      if (e instanceof QueryStopped) setRun({ kind: 'stopped', message: e.message });
-      else if (e instanceof QueryRejected) setRun({ kind: 'rejected', message: e.message });
-      else setRun({ kind: 'error', message: e instanceof Error ? e.message : String(e) });
+      setRun({ kind: 'error', message: e instanceof Error ? e.message : String(e) });
     } finally {
       abort.current = null;
     }
