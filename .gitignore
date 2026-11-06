@@ -10,5 +10,4 @@ golden/out/
 .DS_Store
 .claude/
 .agents/
-docs/
 skills-lock.json
