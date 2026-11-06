@@ -8,6 +8,7 @@
     "build": "vite build",
     "setup": "tsx scripts/setup.ts",
     "test": "vitest run",
+    "golden": "tsx golden/run.ts",
     "typecheck": "tsc -p tsconfig.app.json && tsc -p tsconfig.worker.json && tsc -p tsconfig.node.json"
   },
   "dependencies": {

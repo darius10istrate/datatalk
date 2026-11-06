@@ -3,7 +3,8 @@ import eh_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url'
 import mvp_worker from '@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url';
 import eh_wasm from '@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url';
 import mvp_wasm from '@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url';
-import { DataType, type Field } from 'apache-arrow';
+import type { Field } from 'apache-arrow';
+import { batchToRows, isNumeric, type Cell } from '../../shared/cells';
 import { CREATE_VIEW, DATA_FILE, DUCKDB_VERSION, EXTENSIONS, LOCKDOWN } from '../../shared/lockdown';
 import { sqlString } from '../../shared/sql';
 import { checkAsset, SETUP_HINT } from './asset';
@@ -16,8 +17,6 @@ export type LoadProgress =
   | { stage: 'engine' }
   | { stage: 'data'; loaded: number; total: number }
   | { stage: 'lock' };
-
-export type Cell = string | number | boolean | null;
 
 export type Column = { name: string; numeric: boolean };
 
@@ -121,9 +120,7 @@ export async function runQuery(sql: string, signal: AbortSignal): Promise<Result
     for await (const batch of reader) {
       if (stopped) break;
       fields ??= batch.schema.fields;
-      const cols = fields.map((_, j) => batch.getChildAt(j)!);
-      for (let i = 0; i < batch.numRows && rows.length <= MAX_ROWS; i++)
-        rows.push(cols.map((col, j) => toCell(col.get(i), fields![j]!.type)));
+      rows.push(...batchToRows(fields, batch, MAX_ROWS + 1 - rows.length));
       if (rows.length > MAX_ROWS) break;
     }
     if (stopped) throw stopped;
@@ -142,27 +139,4 @@ export async function runQuery(sql: string, signal: AbortSignal): Promise<Result
     signal.removeEventListener('abort', onAbort);
     busy = false;
   }
-}
-
-const isNumeric = (type: DataType) => DataType.isInt(type) || DataType.isFloat(type) || DataType.isDecimal(type);
-
-const pad = (n: number, w = 2) => String(n).padStart(w, '0');
-
-function formatInstant(ms: number, withTime: boolean): string {
-  const d = new Date(ms);
-  const date = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
-  return withTime ? `${date} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}` : date;
-}
-
-const bigintSafe = (_k: string, v: unknown) => (typeof v === 'bigint' ? v.toString() : v);
-
-function toCell(value: unknown, type: DataType): Cell {
-  if (value === null || value === undefined) return null;
-  if (typeof value === 'bigint') return value.toString();
-  if (DataType.isTimestamp(type) || DataType.isDate(type)) {
-    const ms = value instanceof Date ? value.getTime() : Number(value);
-    return formatInstant(ms, DataType.isTimestamp(type));
-  }
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
-  return JSON.stringify(value, bigintSafe);
 }
